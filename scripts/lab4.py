@@ -8,16 +8,16 @@ import matplotlib.mlab as mlab
 
 degreeQuantum = math.pi/2.0
 pos = [12, 28]
-heading = math.radians(200.52)
+heading = 200.52
 noise = 0.1
 gridQuantum = 0.2
 
 numCells = 35
 
-prevGridProb = [[0.0 for i in range(numCells)] for j in range(numCells)]
-prevGridProb[11][27]  = 1.0
+prevGridProb = np.zeros((4,35,35))
 path = []
-tags = {0:{'x': 1.25, 'y': 5.25}, 1:{'x': 1.25,'y':3.25}, 2:{'x': 1.25,'y':1.25}, 3:{'x': 4.25,'y':1.25}, 4:{'x': 4.25,'y':3.25}, 5:{'x': 4.25,'y':5.25}}
+landmarks = {0:{'x': 1.25, 'y': 5.25}, 1:{'x': 1.25,'y':3.25}, 2:{'x': 1.25,'y':1.25}, 3:{'x': 4.25,'y':1.25}, 4:{'x': 4.25,'y':3.25}, 5:{'x': 4.25,'y':5.25}}
+angleProb = {0: 0.68268949213708585, 1: 0.15730535589982697, 2: 0.0013496113800581799, 3: 0.15730535589982697}
 
 def quaternionToEuler(quaternion):
     x = quaternion.x
@@ -26,105 +26,123 @@ def quaternionToEuler(quaternion):
     w = quaternion.w
     (roll,pitch,yaw) = tf.transformations.euler_from_quaternion((x, y, z, w))
 
-    return yaw
+    return math.degrees(yaw)
 
-def toRad(angle):
+def cos(deg):
+    return math.cos(math.radians(deg))
+
+def sin(deg):
+    return math.sin(math.radians(deg))
+
+def rad(angle):
     return math.radians(angle*degreeQuantum)
 
+def deg(rad):
+    return math.degrees(rad)
 
-def calculateNeighbourProb(x, y, rot, prior, gridProb):
-    cur = (int(x/gridQuantum), int(y/gridQuantum))
-    cordsX = np.array([[0.0 for j in range(3)] for i in range(3)])
-    cordsY = np.array([[0.0 for j in range(3)] for i in range(3)])
-    p = np.array([[0.0 for j in range(3)] for i in range(3)])
+def print_nonzero(gridProb):
+    nz = np.nonzero(gridProb)
+    ind = zip(nz[0], nz[1], nz[2])
+    for i in ind:
+        print i,'-->',gridProb[i[0]][i[1]][i[2]]
 
-    X = np.array(map(lambda temp: temp*gridQuantum + gridQuantum/2.0, [cur[0]-1, cur[0], cur[0]+1]))
-    Y = np.array(map(lambda temp: temp*gridQuantum + gridQuantum/2.0, [cur[1]-1, cur[1], cur[1]+1]))
+def mvnpdf(x, y, mux, muy, sigma):
+    X = np.copy(x)
+    Y = np.copy(y)
+    X -= mux
+    Y -= muy
+    X = x**2
+    Y = y**2
+    XY = (X+Y)/(2*(sigma**2))
 
-    for i in range(3):
-        for j in range(3):
-            cordsX[i][j] = -(X[i]-x)*math.sin(-rot) + (Y[j]-y)*math.cos(-rot)
-            cordsY[i][j] = -1*((X[i]-x)*math.cos(-rot) + (Y[j]-y)*math.sin(-rot))
+    z = np.exp(-XY)
+    z /= z.sum()
 
-    Z = mlab.bivariate_normal(cordsX, cordsY, 0.1, 0.1, 0.0, 0.0)
-    Z /= Z.sum()
+    return z
 
-    for i in range(3):
-        for j in range(3):
-            try:
-                if X[i] < 7.0 and Y[j] < 7.0:
-                    gridProb[int(X[i]/gridQuantum)][int(Y[j]/gridQuantum)] += prior*Z[i][j]
-            except:
-                print X[i]
-                print Y[j]
-            if prior > 0:
-                print 'prior:', prior, Z[i][j]
-                print gridProb[int(X[i]/gridQuantum)][int(Y[j]/gridQuantum)]
+def updateHeadingBelief(rot, gridProb):
+    print 'rot:',quaternionToEuler(rot)
+    for x in range(35):
+        for y in range(35):
+            for h in range(4):
+                p = gridProb[h][x][y]
+                gridProb[h][x][y] = 0.0
+                newHeadingMean = ((90*h) + quaternionToEuler(rot))%360
+                for posterior in range(4):
+                    angleBin = int(((newHeadingMean + (posterior*90))%360)/90)
+                    gridProb[angleBin][x][y] += p*angleProb[posterior]
+    #print_nonzero(gridProb)
 
+def updatePositionBelief(trans, gridProb):
+    print 't:',trans
+    tempGrid = np.zeros((4,35,35))
+    Y,X = np.meshgrid(range(35), range(35))
+    X = X*0.2 + 0.1
+    Y = Y*0.2 + 0.1
     
-def handle_movement(message):
-    pAngle = dict(zip(np.linspace(-2.5, 2.5, 6), norm.cdf(np.linspace(-2.5, 2.5, 6), 0, 0.5)))
-    gridProb = np.array([[0.0 for j in range(numCells)] for i in range(numCells)])
+    for h in range(4):
+        for x in np.array(range(35))*0.2 + 0.1:
+            for y in np.array(range(35))*0.2 + 0.1:
+                if h == 0:
+                    mean = (x + trans, y)
+                elif h == 1:
+                    mean = (x, y + trans)
+                elif h == 2:
+                    mean = (x - trans, y)
+                else:
+                    mean = (x, y - trans)
 
-    for row in range(numCells):
-        for col in range(numCells):
-            pos = (row, col)
-            
-            for angle in range(-2, 3):
-                p = pAngle[angle+0.5] - pAngle[angle-0.5]
-                rot1 = quaternionToEuler(message.rotation1)
-                rot2 = quaternionToEuler(message.rotation2)
+                p = gridProb[h][x][y]
+                gridProb[h][x][y] = 0.0
 
+                Z = mvnpdf(X, Y, mean[0], mean[1], 0.1)
+                Z *= p
+                tempGrid[h] += Z
+        print '*****************'
 
-                rot1 = angle*degreeQuantum + rot1
-                x = ((pos[0]*gridQuantum) + message.translation*math.cos(heading + rot1))
-                y = ((pos[1]*gridQuantum) + message.translation*math.sin(heading + rot1))
+    for direction in range(4):
+        gridProb[direction] = tempGrid[direction]
+                 
+       
+def handle_movement(message, gridProb):
+    updateHeadingBelief(message.rotation1, gridProb)
+    updatePositionBelief(message.translation, gridProb)
+    updateHeadingBelief(message.rotation2, gridProb)
 
-                if angle == 0:
-                    print x,y
-                    print int(x/gridQuantum), int(y/gridQuantum)
-
-                calculateNeighbourProb(x, y, heading+rot1, prevGridProb[row][col]*p, gridProb)
-
-    return (gridProb, heading+rot1+rot2)
-
-def handle_observation(message, gridProb, heading):
-    bearing = quaternionToEuler(message.bearing)
-    sample = np.random.normal(0.0, 0.1)
-    mean = message.range - sample
-    theta = bearing+heading
-
-    pObs = dict(zip([-0.3, -0.1, 0.1, 0.3], norm.cdf([-0.3, -0.1, 0.1, 0.3], 0, 0.5)))
-
-    print pObs
-    y = tags[message.tagNum]['y'] - mean*math.sin(theta)
-    x = tags[message.tagNum]['x'] - mean*math.cos(theta)
-    gridProb[int(x/gridQuantum)][int(y/gridQuantum)] *= pObs[0.1] - pObs[-0.1]
-
-    y1 = tags[message.tagNum]['y'] - mean*math.sin(theta) - 0.1
-    x1 = tags[message.tagNum]['x'] - mean*math.cos(theta) - 0.1
-    gridProb[int(x1/gridQuantum)][int(y1/gridQuantum)] *= pObs[-0.1] - pObs[-0.3]
-
-    y2 = tags[message.tagNum]['y'] - mean*math.sin(theta) + 0.1
-    x2 = tags[message.tagNum]['x'] - mean*math.cos(theta) + 0.1
-    gridProb[int(x2/gridQuantum)][int(y2/gridQuantum)] *= pObs[0.3] - pObs[0.1]
-
-    print gridProb
+def handle_observation(message, gridProb):
+    Y,X = np.meshgrid(range(35), range(35))
+    X = X*0.2 + 0.1
+    Y = Y*0.2 + 0.1
+    mean = landmarks[message.tagNum]
+    Z = mvnpdf(X, Y, mean['x'], mean['y'], 0.1)
+    Z /= Z.sum()
+    #print gridProb
+    for h in range(4):
+        theta = h*90+quaternionToEuler(message.bearing)
+        deltaLandmark = (message.range*cos(theta), message.range*sin(theta))
+        for x in range(35):
+            for y in range(35):
+                expectedLandmark = (np.floor((np.array((x*0.2, y*0.2))+deltaLandmark)/0.2))
+                if max(expectedLandmark) < 35:
+                    gridProb[h][x][y] *= Z[expectedLandmark[0]][expectedLandmark[1]]
+                else:
+                    gridProb[h][x][y] *= 0
 
 def readMessages(filename):
     bag = rosbag.Bag(filename)
-    gridProb = np.array([])
+    gridProb = np.zeros((4, 35, 35))
     c = 0
+    gridProb[2][11][27] = 1.0
     for message in bag.read_messages():
         c += 1
         if message[0] == 'Movements':
-            gridProb, heading = handle_movement(message[1])
+            handle_movement(message[1], gridProb)
         else:
-            handle_observation(message[1], gridProb, heading)
-        if c == 3:
-            break;
+            handle_observation(message[1], gridProb)
+            print np.max(gridProb)
+            print np.where(gridProb == gridProb.max())
 
 if __name__ == '__main__':
-    np.set_printoptions(threshold=np.nan)
+    #np.set_printoptions(threshold=np.nan)
     readMessages('grid.bag')
 
